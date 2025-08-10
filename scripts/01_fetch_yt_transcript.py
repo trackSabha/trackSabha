@@ -16,6 +16,9 @@ import sys
 import os
 import json
 from pathlib import Path
+import argparse
+import re
+import requests
 
 try:
     from apify_client import ApifyClient
@@ -201,28 +204,59 @@ class YouTubeTranscriptScraper:
         
         return saved_file
 
+
+def fetch_playlist_video_ids(playlist_input):
+    """
+    Fetch all video IDs from a YouTube playlist URL or ID using web scraping (no API key required).
+    Args:
+        playlist_input: Playlist URL or ID
+    Returns:
+        List of video IDs
+    """
+    # Extract playlist ID
+    playlist_id = None
+    if 'list=' in playlist_input:
+        playlist_id = playlist_input.split('list=')[1].split('&')[0]
+    elif re.match(r'^[A-Za-z0-9_-]{13,}$', playlist_input):
+        playlist_id = playlist_input
+    else:
+        raise ValueError("Invalid playlist input. Provide a playlist URL or ID.")
+
+    playlist_url = f"https://www.youtube.com/playlist?list={playlist_id}"
+    print(f"Fetching playlist: {playlist_url}")
+    resp = requests.get(playlist_url)
+    if resp.status_code != 200:
+        raise Exception(f"Failed to fetch playlist page: {resp.status_code}")
+    # Find all video IDs in the page
+    video_ids = re.findall(r'"videoId":"([A-Za-z0-9_-]{11})"', resp.text)
+    # Remove duplicates
+    video_ids = list(dict.fromkeys(video_ids))
+    if not video_ids:
+        raise Exception("No video IDs found in playlist.")
+    print(f"Found {len(video_ids)} videos in playlist.")
+    return video_ids
+
 def main():
     """Main function to run the script."""
-    if len(sys.argv) != 2:
-        print("Usage: python youtube_transcript_scraper.py <video_id_or_url>")
-        print("\nExamples:")
-        print("python youtube_transcript_scraper.py dR-eoAEvPH4")
-        print("python youtube_transcript_scraper.py https://www.youtube.com/watch?v=dR-eoAEvPH4")
-        print("python youtube_transcript_scraper.py https://youtu.be/dR-eoAEvPH4")
-        print("\nOutput will be saved as: <video_id>.json")
-        sys.exit(1)
-    
-    video_input = sys.argv[1]
-    
+    parser = argparse.ArgumentParser(description="YouTube Transcript Scraper")
+    parser.add_argument("input", help="YouTube video ID/URL or playlist ID/URL")
+    parser.add_argument("--playlist", action="store_true", help="Treat input as a playlist and extract all videos")
+    args = parser.parse_args()
+
     try:
-        # Initialize scraper
         scraper = YouTubeTranscriptScraper()
-        
-        # Process the video
-        output_file = scraper.process_video(video_input)
-        
-        print(f"\n✅ Success! Transcript saved to: {output_file}")
-        
+        if args.playlist:
+            video_ids = fetch_playlist_video_ids(args.input)
+            for idx, vid in enumerate(video_ids, 1):
+                print(f"\nProcessing video {idx}/{len(video_ids)}: {vid}")
+                try:
+                    output_file = scraper.process_video(vid)
+                    print(f"✅ Transcript saved to: {output_file}")
+                except Exception as e:
+                    print(f"❌ Error processing {vid}: {e}")
+        else:
+            output_file = scraper.process_video(args.input)
+            print(f"\n✅ Success! Transcript saved to: {output_file}")
     except ValueError as e:
         print(f"Configuration error: {e}")
         print("\nTo set up Apify API token:")
