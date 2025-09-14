@@ -364,41 +364,66 @@ class YouTubeToMongoUploader:
 
 def main():
     """Main function to run the script."""
+
     parser = argparse.ArgumentParser(description="Upload YouTube video data to MongoDB")
-    parser.add_argument("json_file", help="Path to the JSON file containing YouTube video data")
+    parser.add_argument("json_file", nargs="?", help="Path to the JSON file containing YouTube video data")
+    parser.add_argument("--folder", help="Path to a folder containing JSON files to upload", default=None)
     parser.add_argument("--database", default="youtube_data", help="MongoDB database name (default: youtube_data)")
-    
+
     args = parser.parse_args()
-    
-    # Check if input file exists
-    if not Path(args.json_file).exists():
-        print(f"Error: Input file '{args.json_file}' does not exist.")
-        sys.exit(1)
-    
+
     try:
-        # Initialize uploader
         uploader = YouTubeToMongoUploader(database_name=args.database)
-        
-        # Load and upload data
-        videos_data = uploader.load_json_file(args.json_file)
-        upload_stats = uploader.upload_videos(videos_data)
-        
+
+        videos_data = []
+        if args.folder:
+            folder_path = Path(args.folder)
+            if not folder_path.exists() or not folder_path.is_dir():
+                print(f"Error: Folder '{args.folder}' does not exist or is not a directory.")
+                sys.exit(1)
+            json_files = list(folder_path.glob("*.json"))
+            if not json_files:
+                print(f"Error: No JSON files found in folder '{args.folder}'.")
+                sys.exit(1)
+            print(f"Found {len(json_files)} JSON files in folder '{args.folder}'.")
+            for json_file in json_files:
+                try:
+                    file_video_id = json_file.stem
+                    loaded = uploader.load_json_file(str(json_file))
+                    # Set video_id for each loaded video
+                    for video in loaded:
+                        video['video_id'] = file_video_id
+                    videos_data.extend(loaded)
+                except Exception as e:
+                    print(f"Error loading {json_file}: {e}")
+        elif args.json_file:
+            if not Path(args.json_file).exists():
+                print(f"Error: Input file '{args.json_file}' does not exist.")
+                sys.exit(1)
+            videos_data = uploader.load_json_file(args.json_file)
+        else:
+            print("Error: Please provide either a JSON file or a folder containing JSON files.")
+            sys.exit(1)
+
+
+        uploader.upload_videos(videos_data)
+
         # Show collection statistics
         collection_stats = uploader.get_collection_stats()
-        print(f"\n📊 Collection Statistics:")
+        print("\n📊 Collection Statistics:")
         print(f"  Total videos in collection: {collection_stats['total_videos']:,}")
         print(f"  Videos with transcripts: {collection_stats['videos_with_transcripts']:,} ({collection_stats['transcript_percentage']}%)")
-        
+
         if collection_stats["top_channels"]:
-            print(f"  Top channels by video count:")
+            print("  Top channels by video count:")
             for channel in collection_stats["top_channels"][:5]:
                 print(f"    {channel['_id']}: {channel['count']} videos")
-        
+
         if collection_stats["date_range"]:
             date_range = collection_stats["date_range"]
             if date_range["earliest"] and date_range["latest"]:
                 print(f"  Date range: {date_range['earliest'].strftime('%Y-%m-%d')} to {date_range['latest'].strftime('%Y-%m-%d')}")
-        
+
     except ValueError as e:
         print(f"Configuration error: {e}")
         print("\nTo set up MongoDB connection:")
