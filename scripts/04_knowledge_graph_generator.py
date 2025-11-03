@@ -141,7 +141,7 @@ Example: `54 This is [unknown] H, Member for St. Peter.`
     "xsd": "http://www.w3.org/2001/XMLSchema#",
     "schema": "http://schema.org/",
     "org": "http://www.w3.org/ns/org#",
-    "lok": "http://example.com/jansety.in/ontology#",
+    "lok": "http://example.com/jansetu.in/ontology#",
     "sess":"http://example.com/jansetu.in/session/",
     "prov": "http://www.w3.org/ns/prov#"
   }},
