@@ -250,7 +250,7 @@ class GraphQuerier:
             pipeline = [
                 {
                     "$vectorSearch": {
-                        "index": "jansetu",  # Name of your vector search index
+                        "index": "vector_index_1",  # Name of your vector search index
                         "path": "embedding",
                         "queryVector": query_embedding,
                         "numCandidates": limit * 2,  # Search more candidates for better results
@@ -753,7 +753,7 @@ class GraphQuerier:
 def main():
     """Main function with argument parsing."""
     parser = argparse.ArgumentParser(description="Query MongoDB graph with vector and text search")
-    parser.add_argument("--db", type=str, default="parliamentary_graph", help="MongoDB database name")
+    parser.add_argument("--db", type=str, default="youtube_data", help="MongoDB database name")
 
     parser.add_argument("query", help="Search query string")
     parser.add_argument("--hops", type=int, default=2, help="Number of traversal hops (default: 2)")
