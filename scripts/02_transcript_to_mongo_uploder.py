@@ -21,12 +21,12 @@ import argparse
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+# urlparse not used
 import re
 
 try:
     from pymongo import MongoClient, ASCENDING, TEXT, DESCENDING
-    from pymongo.errors import ConnectionFailure, DuplicateKeyError, BulkWriteError
+    from pymongo.errors import ConnectionFailure
     from dotenv import load_dotenv
 except ImportError as e:
     print(f"Missing required package: {e}")
@@ -105,11 +105,14 @@ class YouTubeToMongoUploader:
         # Try to create unique index on VideoURL, but handle existing null values
         try:
             # First, let's create a partial unique index that only applies to non-null VideoURL values
+            # Use a sparse unique index instead of a partialFilterExpression for wider server compatibility.
+            # Sparse ensures documents that do not have the VideoURL field are not indexed.
+            # Note: sparse does not exclude empty-string values; ensure upstream data avoids empty VideoURL when uniqueness matters.
             self.videos.create_index(
-                [("VideoURL", ASCENDING)], 
-                unique=True, 
+                [("VideoURL", ASCENDING)],
+                unique=True,
                 name="video_url_unique",
-                partialFilterExpression={"VideoURL": {"$ne": None}}
+                sparse=True,
             )
         except Exception as e:
             print(f"Warning: Could not create index video_url_unique: {e}")
@@ -222,11 +225,25 @@ class YouTubeToMongoUploader:
         cleaned["views_numeric"] = self.extract_numeric_views(video_data.get("Views"))
         cleaned["duration_seconds"] = self.parse_duration(video_data.get("Runtime"))
         cleaned["published_datetime"] = self.parse_published_date(video_data.get("published_Date"))
+        # Compatibility: ensure top-level published_Date exists (legacy field)
+        # Prefer original string if present, otherwise derive from parsed datetime
+        original_published = video_data.get("published_Date")
+        if original_published:
+            cleaned["published_Date"] = original_published
+        else:
+            pd = cleaned.get("published_datetime")
+            try:
+                if pd:
+                    # store ISO string for legacy field
+                    cleaned["published_Date"] = pd.isoformat()
+            except Exception:
+                pass
         
         # Process transcript data
         transcript_info = self.process_transcript(video_data.get("transcript", {}))
         cleaned["transcript_info"] = transcript_info
-        
+        # Compatibility: set top-level hasTranscript for existing queries/indexes
+        cleaned["hasTranscript"] = bool(transcript_info.get("has_transcript", False))
         # Extract video ID from URL
         video_url = cleaned.get("VideoURL", "")
         if "watch?v=" in video_url:
@@ -303,30 +320,39 @@ class YouTubeToMongoUploader:
         
         for video in processed_videos:
             try:
-                # Use update_one with upsert instead of bulk operations for better error handling
-                result = self.videos.update_one(
-                    {"VideoURL": video["VideoURL"]},
-                    {"$set": video},
-                    upsert=True
-                )
-                
-                if result.upserted_id:
-                    stats["inserted"] += 1
-                elif result.modified_count > 0:
-                    stats["updated"] += 1
-                    
+                # If dry-run, just check existence and report what would happen
+                if getattr(self, 'dry_run', False):
+                    existing = self.videos.find_one({"VideoURL": video["VideoURL"]})
+                    if existing is None:
+                        stats["inserted"] += 1
+                        print(f"[dry-run] Would insert: {video['VideoURL']}")
+                    else:
+                        stats["updated"] += 1
+                        print(f"[dry-run] Would update: {video['VideoURL']}")
+                else:
+                    # Use update_one with upsert instead of bulk operations for better error handling
+                    result = self.videos.update_one(
+                        {"VideoURL": video["VideoURL"]},
+                        {"$set": video},
+                        upsert=True
+                    )
+                    if getattr(result, 'upserted_id', None):
+                        stats["inserted"] += 1
+                    elif getattr(result, 'modified_count', 0) > 0:
+                        stats["updated"] += 1
+
             except Exception as e:
                 print(f"Error: {e}")
                 stats["errors"] += 1
                 continue
         
-        print(f"✅ Upload complete:")
+        print("✅ Upload complete:")
         print(f"   Processed: {stats['processed']} videos")
         print(f"   Inserted: {stats['inserted']} new videos")
         print(f"   Updated: {stats['updated']} existing videos")
         if stats["errors"] > 0:
             print(f"   Errors: {stats['errors']} videos failed processing")
-        
+
         return stats
     
     def get_collection_stats(self) -> Dict[str, Any]:
@@ -368,15 +394,78 @@ def main():
     parser = argparse.ArgumentParser(description="Upload YouTube video data to MongoDB")
     parser.add_argument("json_file", nargs="?", help="Path to the JSON file containing YouTube video data")
     parser.add_argument("--folder", help="Path to a folder containing JSON files to upload", default=None)
+    parser.add_argument("--transcripts", help="Path to transcripts folder containing scraper output JSON files", default=None)
+    parser.add_argument("--dry-run", action="store_true", help="Do not write to MongoDB; just show what would be uploaded")
     parser.add_argument("--database", default="youtube_data", help="MongoDB database name (default: youtube_data)")
 
     args = parser.parse_args()
 
     try:
         uploader = YouTubeToMongoUploader(database_name=args.database)
+        # set dry-run mode on uploader if requested
+        uploader.dry_run = bool(args.dry_run)
 
         videos_data = []
-        if args.folder:
+
+        # Priority: if --transcripts provided, use it (so running with only --transcripts works)
+        if args.transcripts:
+            transcripts_path = Path(args.transcripts)
+            if not transcripts_path.exists() or not transcripts_path.is_dir():
+                print(f"Error: transcripts folder '{args.transcripts}' does not exist or is not a directory.")
+                sys.exit(1)
+
+            json_files = list(transcripts_path.glob("*.json"))
+            if not json_files:
+                print(f"Error: No JSON files found in transcripts folder '{args.transcripts}'.")
+                sys.exit(1)
+
+            print(f"Found {len(json_files)} transcript files in '{args.transcripts}'. Processing...")
+            for json_file in json_files:
+                try:
+                    with open(json_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+
+                    # If the file contains a failure structure, skip it
+                    if isinstance(data, dict) and data.get('data') and isinstance(data.get('data'), dict) and data['data'].get('success') is False:
+                        print(f"Skipping failed transcript file: {json_file.name} -> {data['data'].get('message')}")
+                        continue
+
+                    # If data is a list of segments (successful transcript), construct a minimal video object
+                    segments = None
+                    if isinstance(data, dict) and isinstance(data.get('data'), list):
+                        segments = data['data']
+                    elif isinstance(data, list):
+                        segments = data
+
+                    if segments is None:
+                        print(f"Warning: Unrecognized transcript format in {json_file.name}; skipping.")
+                        continue
+
+                    video_id = json_file.stem
+                    # Build formattedContent by joining segment texts so process_transcript can extract text
+                    joined_text = " ".join([str(s.get('text', '')).strip() for s in segments if s.get('text')])
+                    video_obj = {
+                        'video_id': video_id,
+                        'VideoURL': f"https://www.youtube.com/watch?v={video_id}",
+                        # minimal transcript structure compatible with process_transcript
+                        'transcript': {
+                            'hasTranscript': True,
+                            'format': 'json',
+                            'language': 'unknown',
+                            'isTranslated': False,
+                            'isAutoGenerated': False,
+                            'segmentCount': len(segments),
+                            'formattedContent': joined_text,
+                            # also include raw segments so downstream processing can extract text
+                            'segments': segments
+                        }
+                    }
+                    # Add the simple video object
+                    videos_data.append(video_obj)
+                except Exception as e:
+                    print(f"Error loading transcript {json_file.name}: {e}")
+
+        elif args.folder:
             folder_path = Path(args.folder)
             if not folder_path.exists() or not folder_path.is_dir():
                 print(f"Error: Folder '{args.folder}' does not exist or is not a directory.")
@@ -396,15 +485,16 @@ def main():
                     videos_data.extend(loaded)
                 except Exception as e:
                     print(f"Error loading {json_file}: {e}")
+
         elif args.json_file:
             if not Path(args.json_file).exists():
                 print(f"Error: Input file '{args.json_file}' does not exist.")
                 sys.exit(1)
             videos_data = uploader.load_json_file(args.json_file)
-        else:
-            print("Error: Please provide either a JSON file or a folder containing JSON files.")
-            sys.exit(1)
 
+        else:
+            print("Error: Please provide either a JSON file or a folder containing JSON files, or use --transcripts.")
+            sys.exit(1)
 
         uploader.upload_videos(videos_data)
 

@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 try:
     from langchain_google_genai import ChatGoogleGenerativeAI
-    from langchain.schema import HumanMessage, SystemMessage
+    from langchain_core.messages import HumanMessage, SystemMessage
     from pymongo import MongoClient
     from pymongo.errors import ConnectionFailure
     from dotenv import load_dotenv
@@ -79,7 +79,8 @@ class MongoDBTranscriptProcessor:
             )
         
         self.llm = ChatGoogleGenerativeAI(
-            model="gemma-3n-e4b-it",
+            #model="gemma-3n-e4b-it",
+            model="gemini-flash-lite-latest",
             google_api_key=api_key,
             temperature=1.0,
             thinking_budget=0  # Disable thinking mode
@@ -162,12 +163,14 @@ Process the following XML transcript data and return ONLY the formatted output w
             "hasTranscript": True
         }
         
-        # Only fetch necessary fields
+        # Only fetch necessary fields. Also fetch transcript.segments so we can
+        # reconstruct XML if formattedContent does not contain timecodes.
         projection = {
             "VideoURL": 1,
             "Video_title": 1,
             "video_id": 1,
             "transcript.formattedContent": 1,
+            "transcript.segments": 1,
             "_id": 1
         }
         
@@ -220,6 +223,50 @@ Process the following XML transcript data and return ONLY the formatted output w
         except Exception as e:
             raise Exception(f"Error processing with Gemini model: {str(e)}")
 
+    def segments_to_xml(self, segments: List[Dict[str, Any]]) -> str:
+        """
+        Convert a list of segment dicts into XML-style <text> elements.
+
+        This attempts to read common fields used by upstream scrapers: 'start',
+        'dur' or 'duration', and 'text'. Falls back to safe defaults when fields
+        are missing.
+        """
+        if not segments:
+            return ""
+
+        def esc(s: str) -> str:
+            if s is None:
+                return ""
+            return str(s).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+        parts: List[str] = []
+        for seg in segments:
+            # common field names
+            start = seg.get('start') if isinstance(seg.get('start'), (int, float, str)) else seg.get('startTime', seg.get('t', 0))
+            dur = seg.get('dur', seg.get('duration', ''))
+            text = seg.get('text') or seg.get('content') or seg.get('utterance') or ''
+
+            # Normalize numeric values to strings preserving decimals when present
+            try:
+                if isinstance(start, (int, float)):
+                    start_str = str(float(start))
+                else:
+                    start_str = str(start)
+            except Exception:
+                start_str = '0'
+
+            try:
+                if isinstance(dur, (int, float)):
+                    dur_str = str(float(dur))
+                else:
+                    dur_str = str(dur)
+            except Exception:
+                dur_str = ''
+
+            parts.append(f'<text start="{esc(start_str)}" dur="{esc(dur_str)}">{esc(text)}</text>')
+
+        return "\n".join(parts)
+
     def save_processed_transcript(self, video_url: str, video_title: str, video_id: str, processed_transcript: str) -> bool:
         """
         Save the processed transcript to the videos collection.
@@ -244,7 +291,7 @@ Process the following XML transcript data and return ONLY the formatted output w
             }
             
             # Use upsert to update if exists or insert if new
-            result = self.videos.update_one(
+            self.videos.update_one(
                 {"VideoURL": video_url},
                 {"$set": document},
                 upsert=True
@@ -302,21 +349,47 @@ Process the following XML transcript data and return ONLY the formatted output w
             try:
                 # Get transcript content
                 xml_content = video.get("transcript", {}).get("formattedContent", "")
-                
-                if not xml_content:
-                    print("  ⚠️  No transcript content found")
-                    stats["errors"] += 1
-                    continue
+
+                # If formattedContent does not contain <text> tags but segments exist,
+                # rebuild a time-coded XML representation from the segments so the
+                # LLM has start/duration metadata to produce correct time-aligned output.
+                try:
+                    has_text_tags = '<text' in (xml_content or '').lower()
+                except Exception:
+                    has_text_tags = False
+
+                if not has_text_tags:
+                    segments = video.get("transcript", {}).get("segments")
+                    if segments:
+                        print("  ℹ️  formattedContent has no timecodes; rebuilding XML from transcript.segments")
+                        xml_content = self.segments_to_xml(segments)
+                    else:
+                        # If there's no segments and no tags, treat as missing timecodes but
+                        # continue to send whatever is available (the model may still help).
+                        if not xml_content:
+                            print("  ⚠️  No transcript content found")
+                            stats["errors"] += 1
+                            continue
+                        else:
+                            print("  ⚠️  formattedContent contains no <text> tags and no segments; sending raw content")
                 
                 # Show content preview
                 text_preview = self.extract_text_from_xml(xml_content)
                 print(f"  📝 Content preview: {text_preview[:100]}...")
                 print(f"  📊 XML content length: {len(xml_content)} characters")
-                
-                # Process transcript
+
+                # Process transcript (or simulate when dry-run)
+                if getattr(self, 'dry_run', False):
+                    print("  🔎 [dry-run] Would call Gemini to process this transcript (skipped).")
+                    print(f"  🔎 [dry-run] Sending {len(xml_content)} chars to LLM for: {video_title[:80]}")
+                    # Simulate successful processing without saving
+                    stats["processed"] += 1
+                    print("  💾 [dry-run] Would save processed transcript to videos collection (skipped).")
+                    continue
+                # Real run: call the LLM and save result
                 print("  🤖 Processing with Gemini...")
                 processed_transcript = self.process_single_transcript(xml_content, video_title)
-                
+
                 # Save to videos collection
                 print("  💾 Saving processed transcript...")
                 if self.save_processed_transcript(video_url, video_title, video_id, processed_transcript):
@@ -332,7 +405,7 @@ Process the following XML transcript data and return ONLY the formatted output w
                 continue
         
         # Print final statistics
-        print(f"\n📊 Processing Complete!")
+        print("\n📊 Processing Complete!")
         print(f"  Total videos: {stats['total']}")
         print(f"  Successfully processed: {stats['processed']}")
         print(f"  Skipped (already processed): {stats['skipped']}")
@@ -358,6 +431,7 @@ Process the following XML transcript data and return ONLY the formatted output w
 def main():
     """Main function to run the script."""
     parser = argparse.ArgumentParser(description="Process parliamentary transcripts from MongoDB")
+    parser.add_argument("--dry-run", action="store_true", help="Do not call the LLM or write results; just show what would be processed")
     parser.add_argument("--database", default="parliamentary_graph", help="MongoDB database name")
     parser.add_argument("--limit", type=int, help="Limit number of videos to process")
     parser.add_argument("--force", action="store_true", help="Reprocess already processed videos")
@@ -368,7 +442,9 @@ def main():
     try:
         # Initialize processor
         processor = MongoDBTranscriptProcessor(database_name=args.database)
-        
+        # Wire up dry-run so processing code can skip LLM and DB writes
+        processor.dry_run = bool(args.dry_run)
+
         if args.stats:
             # Show statistics only
             stats = processor.get_processing_stats()
