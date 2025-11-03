@@ -51,6 +51,10 @@ class YouTubeTranscriptScraper:
         
         self.client = ApifyClient(api_token)
         self.actor_id = "pintostudio/youtube-transcript-scraper"
+        # number of retries for transient failures
+        self.max_retries = int(os.getenv('YT_TRANSCRIPT_MAX_RETRIES', '3'))
+        # backoff factor in seconds (will multiply by attempt number)
+        self.backoff_factor = float(os.getenv('YT_TRANSCRIPT_BACKOFF', '1.0'))
     
     def extract_video_id(self, video_input: str) -> str:
         """
@@ -142,11 +146,27 @@ class YouTubeTranscriptScraper:
         Returns:
             Path to saved file
         """
-        output_file = f"{video_id}.json"
-        
+        # ensure transcripts directory exists
+        transcripts_dir = Path(__file__).resolve().parents[1] / 'transcripts'
+        transcripts_dir.mkdir(parents=True, exist_ok=True)
+        output_file = transcripts_dir / f"{video_id}.json"
+
         print(f"Saving transcript to: {output_file}")
-        
+
         try:
+            # If file exists and contains success: false, overwrite it. Otherwise overwrite normally.
+            if output_file.exists():
+                try:
+                    with open(output_file, 'r', encoding='utf-8') as fr:
+                        existing = json.load(fr)
+                        if isinstance(existing, dict) and existing.get('data', {}).get('success') is False:
+                            print(f"Overwriting previous failed transcript file: {output_file}")
+                        else:
+                            print(f"Overwriting existing transcript file: {output_file}")
+                except Exception:
+                    # if file is not valid json or cannot be read, just overwrite
+                    print(f"Existing file present but could not be read as JSON. Overwriting: {output_file}")
+
             with open(output_file, 'w', encoding='utf-8') as f:
                 json.dump(transcript_data, f, indent=2, ensure_ascii=False)
             
@@ -171,31 +191,93 @@ class YouTubeTranscriptScraper:
         video_id = self.extract_video_id(video_input)
         print(f"Processing video ID: {video_id}")
         
-        # Check if transcript already exists
-        output_file = f"{video_id}.json"
-        if Path(output_file).exists():
-            print(f"Transcript file already exists: {output_file}")
-            response = input("Overwrite existing file? (y/N): ").strip().lower()
-            if response != 'y':
-                print("Skipping download.")
-                return output_file
+        # Check if transcript already exists in transcripts/ and skip if success:true
+        transcripts_dir = Path(__file__).resolve().parents[1] / 'transcripts'
+        transcripts_dir.mkdir(parents=True, exist_ok=True)
+        output_file_path = transcripts_dir / f"{video_id}.json"
+        if output_file_path.exists():
+            try:
+                with open(output_file_path, 'r', encoding='utf-8') as fr:
+                    existing = json.load(fr)
+                    if isinstance(existing, dict) and existing.get('data', {}).get('success') is False:
+                        # overwrite failed file
+                        print(f"Existing transcript has success:false — will attempt to re-download and overwrite: {output_file_path}")
+                    else:
+                        print(f"Transcript already exists and appears successful: {output_file_path}. Skipping download.")
+                        return str(output_file_path)
+            except Exception:
+                # if unreadable, proceed to overwrite
+                print(f"Existing transcript file present but unreadable; will attempt to overwrite: {output_file_path}")
         
-        # Scrape transcript
-        transcript_data = self.scrape_transcript(video_id)
-        
+    # Scrape transcript with retries for transient/unsuccessful responses
+        attempt = 0
+        last_exception = None
+        transcript_data = None
+        while attempt < self.max_retries:
+            attempt += 1
+            try:
+                transcript_data = self.scrape_transcript(video_id)
+
+                # If Apify/actor returns a structure that indicates failure, handle retry
+                # Be defensive: transcript_data may be a list, dict with data:list, or dict with data: {success: false}
+                if isinstance(transcript_data, dict) and isinstance(transcript_data.get('data'), dict) and transcript_data['data'].get('success') is False:
+                    msg = transcript_data.get('data', {}).get('message', '')
+                    print(f"Attempt {attempt}/{self.max_retries}: actor returned success=false: {msg}")
+                    last_exception = Exception(f"actor returned success=false: {msg}")
+                    # Save or overwrite failed file immediately so we have a record (will be overwritten on success)
+                    try:
+                        self.save_transcript(video_id, transcript_data)
+                    except Exception as e:
+                        print(f"Failed to write failed transcript file: {e}")
+                    # backoff before retrying
+                    if attempt < self.max_retries:
+                        sleep_time = self.backoff_factor * attempt
+                        print(f"Retrying after {sleep_time:.1f}s...")
+                        import time
+                        time.sleep(sleep_time)
+                        continue
+                    else:
+                        break
+
+                # If we get here, transcript_data is assumed good
+                break
+
+            except Exception as e:
+                last_exception = e
+                print(f"Attempt {attempt}/{self.max_retries} failed: {e}")
+                if attempt < self.max_retries:
+                    sleep_time = self.backoff_factor * attempt
+                    print(f"Retrying after {sleep_time:.1f}s...")
+                    import time
+                    time.sleep(sleep_time)
+                else:
+                    break
+
+        if transcript_data is None and last_exception is not None:
+            raise last_exception
+
         # Save to file
         saved_file = self.save_transcript(video_id, transcript_data)
-        
-        # Display summary
-        if 'transcript' in transcript_data and isinstance(transcript_data['transcript'], list):
-            total_segments = len(transcript_data['transcript'])
+
+        # Display summary: support multiple transcript shapes returned by actor
+        segments = None
+        if isinstance(transcript_data, list):
+            segments = transcript_data
+        elif isinstance(transcript_data, dict):
+            if isinstance(transcript_data.get('data'), list):
+                segments = transcript_data.get('data')
+            elif isinstance(transcript_data.get('transcript'), list):
+                segments = transcript_data.get('transcript')
+
+        if isinstance(segments, list):
+            total_segments = len(segments)
             print(f"Transcript contains {total_segments} segments")
-            
+
             if total_segments > 0:
-                first_segment = transcript_data['transcript'][0]
-                last_segment = transcript_data['transcript'][-1]
-                
-                if 'start' in first_segment and 'start' in last_segment and 'dur' in last_segment:
+                first_segment = segments[0]
+                last_segment = segments[-1]
+
+                if isinstance(first_segment, dict) and isinstance(last_segment, dict) and 'start' in first_segment and 'start' in last_segment and 'dur' in last_segment:
                     try:
                         duration = float(last_segment['start']) + float(last_segment['dur'])
                         print(f"Total duration: {duration:.1f} seconds ({duration/60:.1f} minutes)")
