@@ -6,12 +6,21 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "apify-client>=1.12.2",
+    "beautifulsoup4>=4.14.2",
+    "fastapi>=0.121.0",
+    "google-adk>=1.17.0",
     "google-genai>=1.48.0",
+    "jinja2>=3.1.6",
+    "json-repair>=0.52.4",
     "langchain>=1.0.3",
     "langchain-google-genai>=3.0.0",
+    "markdown>=3.10",
+    "networkx>=3.5",
     "pymongo>=4.14.0",
     "python-dateutil>=2.9.0.post0",
     "python-dotenv>=1.1.1",
+    "pytz>=2025.2",
     "rdflib>=7.4.0",
     "requests>=2.32.4",
+    "uvicorn>=0.38.0",
 ]
