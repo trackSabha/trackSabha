@@ -24,8 +24,3 @@ dependencies = [
     "requests>=2.32.4",
     "uvicorn>=0.38.0",
 ]
-
-
-[build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
