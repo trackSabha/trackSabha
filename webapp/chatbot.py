@@ -1907,6 +1907,8 @@ class ParliamentaryGraphQuerier:
             # Return original if streamlining fails
             return full_results
 
+# In your chatbot.py file...
+
 class ParliamentarySystem:
     """Main system for parliamentary research, integrating agent, querier, and session management."""
 
@@ -1916,32 +1918,27 @@ class ParliamentarySystem:
         self.session_manager = MongoSessionManager()
         self.session_graphs: Dict[str, SessionGraphState] = {}
         self.agent = self._create_agent()
-        self.runner = InMemoryRunner(self.agent)
+        self.runner = InMemoryRunner(agent=self.agent)
         logger.info("✅ ParliamentarySystem initialized with MongoDB session manager")
 
     def _create_agent(self) -> LlmAgent:
         """Create and configure the LLM agent."""
         search_tool = FunctionTool(
-            func=self.querier.get_structured_search_results,
+            func=self.querier.get_structured_search_results
         )
         
-        planner = BuiltInPlanner(
-            model=types.Model(
-                name="gemini-flash-latest",
-                generate_content_config=GenerateContentConfig(
-                    temperature=0.1,
-                    max_output_tokens=8000,
-                ),
-            ),
-            tools=[search_tool],
-        )
-        
+        planner = BuiltInPlanner(thinking_config=types.ThinkingConfig(thinking_budget=0))
+
         return LlmAgent(
+            name="TrackSabha",
+            model="gemini-flash-latest",
+            description="AI assistant for the Indian Parliament using parliamentary transcripts and provenance",
             planner=planner,
-            system_instruction="""You are TrackSabha, an expert AI assistant for the Indian Parliament.
+            instruction="""You are TrackSabha, an expert AI assistant for the Indian Parliament.
 Your role is to provide accurate, factual, and well-sourced answers based on parliamentary transcripts and data.
-Always use the provided `parliamentary_search` tool to find information.
-When you receive search results, synthesize them into a clear, structured response.
+The user's input may contain previous conversation history for context. Focus on answering the newest user query at the end.
+Always use the provided `get_structured_search_results` tool to find information to answer the user's query.
+When you receive search results, synthesize them into a clear, structured JSON response that matches the required format.
 Your response should be in markdown format and include:
 1.  An introductory summary.
 2.  Detailed "Response Cards" for each key finding, with a one-sentence summary and full details.
@@ -1949,38 +1946,55 @@ Your response should be in markdown format and include:
 4.  A list of follow-up questions.
 Do not invent information. If the search results do not contain the answer, state that clearly.
 """,
+            tools=[search_tool],
+            generate_content_config=GenerateContentConfig(
+                temperature=0.1,
+                max_output_tokens=8000,
+                response_mime_type="application/json",
+            ),
         )
 
     async def process_query(self, query: str, user_id: str, session_id: Optional[str] = None) -> Tuple[str, Dict[str, Any]]:
         """Process a user query, manage session, and return a structured response."""
         try:
-            session_id = await self.session_manager.ensure_session(user_id, session_id)
+            session = await self.session_manager.ensure_session(user_id, session_id)
+            session_id = session.session_id
             session_graph = self._get_session_graph(session_id)
             
-            history = await self.get_session_history(session_id)
+            # Log the new user message first
+            await self.session_manager.add_message(session_id, "user", query)
             
-            # Use the agent to process the query
-            agent_response_coro = self.runner.run_async(
-                query,
-                history=history,
-                instructions="Use the parliamentary_search tool to answer the user's question.",
-            )
+            # This call will now work correctly because we fixed the session_manager
+            chat_history = await self.get_session_history(session_id, limit=10)
+            
+            # Manually construct a single prompt with history because the runner API is stateless
+            history_str_parts = []
+            if chat_history:
+                history_str_parts.append("Previous conversation history for context:")
+                for entry in reversed(chat_history): # Oldest first
+                    role = "User" if entry.role == "user" else "Assistant"
+                    text_content = " ".join(p.text for p in entry.parts if hasattr(p, 'text'))
+                    if text_content:
+                        history_str_parts.append(f"{role}: {text_content}")
+            
+            history_str_parts.append("\nNew User Query:")
+            history_str_parts.append(query)
+            
+            prompt_with_context = "\n".join(history_str_parts)
+
+            # This call is correct: a single positional argument with no keywords.
+            agent_response_coro = self.runner.run_async(prompt_with_context)
             
             agent_response_str = await agent_response_coro
             
-            # Try to repair and parse the JSON response from the agent
             try:
                 repaired_json_str = repair_json(agent_response_str)
                 structured_response_data = json.loads(repaired_json_str)
                 structured_response = StructuredResponse(**structured_response_data)
                 
-                # Log the successful response
                 await self.session_manager.add_message(
                     session_id, "assistant", agent_response_str, metadata={"parsed_successfully": True}
                 )
-                
-                # Update session graph with data from the response
-                # This part needs to be adapted based on how the agent provides graph data
                 
                 return agent_response_str, {
                     "success": True, 
@@ -1990,9 +2004,8 @@ Do not invent information. If the search results do not contain the answer, stat
                     "response_type": "structured"
                 }
 
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.warning(f"Could not parse agent response as JSON: {e}. Falling back to text.")
-                # Log the failed response
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
+                logger.warning(f"Could not parse agent response as JSON: {e}. Falling back to text. Response was: {agent_response_str}")
                 await self.session_manager.add_message(
                     session_id, "assistant", agent_response_str, metadata={"parsed_successfully": False, "error": str(e)}
                 )
@@ -2004,7 +2017,9 @@ Do not invent information. If the search results do not contain the answer, stat
                 }
 
         except Exception as e:
-            logger.error(f"Error processing query: {e}")
+            logger.error(f"Error processing query: {e}", exc_info=True)
+            if session_id:
+                await self.session_manager.add_message(session_id, "assistant", f"An error occurred: {e}", metadata={"is_error": True})
             return f"An error occurred: {e}", {"success": False, "session_id": session_id}
 
     def _get_session_graph(self, session_id: str) -> SessionGraphState:

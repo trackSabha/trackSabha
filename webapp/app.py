@@ -25,7 +25,6 @@ import uvicorn
 
 # Database and ML imports
 from pymongo import MongoClient, ASCENDING
-from sentence_transformers import SentenceTransformer
 
 # Google ADK imports
 from google.adk.agents import LlmAgent
@@ -35,7 +34,7 @@ from google.adk.planners import BuiltInPlanner
 from google.genai.types import Content, Part, GenerateContentConfig
 from google.genai import types
 from rdflib import Graph, Namespace, URIRef, Literal
-from rdflib.namespace import RDF, RDFS
+from rdflib.namespace import RDF, RDFS, FOAF, OWL, XSD
 
 # Markdown processing
 import markdown
@@ -59,9 +58,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # RDF Namespaces
-BBP = Namespace("http://example.com/Jansetu.in/ontology#")
+LOK = Namespace("http://example.com/Indian-parliament-ontology#")
+SESS = Namespace("http://example.com/Indian-parliament-session/")
 SCHEMA = Namespace("http://schema.org/")
+ORG = Namespace("http://www.w3.org/ns/org#")
 PROV = Namespace("http://www.w3.org/ns/prov#")
+BBP = Namespace("http://example.com/TrackSabha.in/")
 
 # Pydantic models for API
 class QueryRequest(BaseModel):
@@ -137,11 +139,17 @@ class SessionGraphState:
         self.created_at = datetime.now(timezone.utc)
         
         # Re-bind namespaces
-        self.graph.bind("lok", BBP)
+        self.graph.bind("lok", LOK)
+        self.graph.bind("bbp", BBP)
+        self.graph.bind("sess", SESS)
         self.graph.bind("schema", SCHEMA)
+        self.graph.bind("org", ORG)
         self.graph.bind("prov", PROV)
-        self.graph.bind("rdfs", RDFS)
+        self.graph.bind("foaf", FOAF)
+        self.graph.bind("owl", OWL)
         self.graph.bind("rdf", RDF)
+        self.graph.bind("rdfs", RDFS)
+        self.graph.bind("xsd", XSD)
         
         self.node_count = 0
         self.edge_count = 0
@@ -167,7 +175,9 @@ class ParliamentaryGraphQuerier:
         self.nodes = None
         self.edges = None
         self.statements = None
-        self.embedding_model = None
+        self.genai_client = None
+        self.use_google_embeddings = False
+        self.embedding_model_name = "gemini-embedding-001"
         self._initialize_database()
         self._initialize_embeddings()
 
@@ -214,14 +224,109 @@ class ParliamentaryGraphQuerier:
             raise ConnectionError(f"Failed to connect to MongoDB: {e}")
 
     def _initialize_embeddings(self):
-        """Initialize embedding model."""
+        """Initialize Gemini embedding client."""
+        api_key = (
+            os.getenv("GOOGLE_API_KEY")
+            or os.getenv("GOOGLE_GENAI_API_KEY")
+            or os.getenv("GEMINI_API_KEY")
+        )
+
+        if not api_key:
+            raise RuntimeError(
+                "GOOGLE_API_KEY, GOOGLE_GENAI_API_KEY, or GEMINI_API_KEY environment variable required for embeddings"
+            )
+
         try:
-            logger.info("🔄 Loading embedding model...")
-            self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-            logger.info("✅ Vector search enabled")
+            from google import genai
+
+            logger.info("🔄 Initializing Gemini embedding client...")
+            self.genai_client = genai.Client(api_key=api_key)
+            self.use_google_embeddings = True
+            logger.info("✅ Vector search enabled via gemini-embedding-001")
         except Exception as e:
-            logger.error(f"❌ Failed to load embedding model: {e}")
+            self.genai_client = None
+            self.use_google_embeddings = False
+            logger.error(f"❌ Failed to initialize Gemini embeddings: {e}")
             raise RuntimeError(f"Vector search failed to initialize: {e}")
+
+    def _generate_query_embedding(self, text: str) -> List[float]:
+        """Generate an embedding for the provided text using Gemini."""
+        if not self.use_google_embeddings or not self.genai_client:
+            raise RuntimeError("Gemini embedding client not initialized")
+
+        clean_text = " ".join(text.split()).strip()
+        if not clean_text:
+            raise ValueError("Query text required for embedding")
+
+        try:
+            response = self.genai_client.models.embed_content(
+                model=self.embedding_model_name,
+                contents=[clean_text]
+            )
+        except Exception as e:
+            logger.error(f"❌ Gemini embedding request failed: {e}")
+            raise RuntimeError(f"Gemini embedding request failed: {e}") from e
+
+        embedding_values = self._extract_embedding_values(response)
+        if not embedding_values:
+            raise RuntimeError("Gemini embedding response missing values")
+
+        return embedding_values
+
+    @staticmethod
+    def _extract_embedding_values(response: Any) -> Optional[List[float]]:
+        """Normalize Gemini embedding responses into a flat list of floats."""
+        embeddings = getattr(response, "embeddings", None)
+        if embeddings is None and isinstance(response, dict):
+            embeddings = response.get("embeddings")
+
+        if embeddings is None:
+            return None
+
+        candidate = None
+        if isinstance(embeddings, (list, tuple)):
+            if not embeddings:
+                return None
+            candidate = embeddings[0]
+        else:
+            candidate = embeddings
+
+        if candidate is None:
+            return None
+
+        values = getattr(candidate, "values", None)
+        if isinstance(values, (list, tuple)):
+            try:
+                return [float(v) for v in values]
+            except Exception:
+                return None
+
+        if isinstance(candidate, dict):
+            for key in ("embedding", "value", "vector", "values"):
+                raw = candidate.get(key)
+                if isinstance(raw, (list, tuple)):
+                    try:
+                        return [float(v) for v in raw]
+                    except Exception:
+                        return None
+
+        attr_embedding = getattr(candidate, "embedding", None)
+        if isinstance(attr_embedding, (list, tuple)):
+            try:
+                return [float(v) for v in attr_embedding]
+            except Exception:
+                return None
+
+        if isinstance(candidate, (list, tuple)):
+            try:
+                return [float(v) for v in candidate]
+            except Exception:
+                return None
+
+        try:
+            return [float(v) for v in candidate]  # type: ignore[arg-type]
+        except Exception:
+            return None
 
     def unified_hybrid_search(self, query: str, limit: int = 8) -> List[Dict]:
         """
@@ -336,8 +441,8 @@ class ParliamentaryGraphQuerier:
             return []
 
     def _search_nodes_vector(self, query: str, limit: int) -> List[Dict]:
-        """Vector search on nodes (existing logic)"""
-        query_embedding = self.embedding_model.encode(query).tolist()
+        """Vector search on nodes using Gemini embeddings."""
+        query_embedding = self._generate_query_embedding(query)
         
         pipeline = [
             {"$vectorSearch": {
@@ -601,9 +706,17 @@ class ParliamentaryGraphQuerier:
             g = Graph()
             
             # Add prefixes
-            g.bind("bbp", "http://example.com/Jansetu.in/ontology#")
-            g.bind("rdfs", RDFS)
+            g.bind("lok", LOK)
+            g.bind("bbp", BBP)
+            g.bind("sess", SESS)
+            g.bind("schema", SCHEMA)
+            g.bind("org", ORG)
+            g.bind("prov", PROV)
+            g.bind("foaf", FOAF)
+            g.bind("owl", OWL)
             g.bind("rdf", RDF)
+            g.bind("rdfs", RDFS)
+            g.bind("xsd", XSD)
             
             # Add nodes
             for node in subgraph["nodes"]:
@@ -645,10 +758,17 @@ class ParliamentaryGraphQuerier:
             logger.info(f"📚 Getting provenance for {len(node_uris)} nodes")
             
             g = Graph()
-            g.bind("bbp", "http://example.com/Jansetu.in/ontology#")
-            g.bind("prov", "http://www.w3.org/ns/prov#")
-            g.bind("schema", "http://schema.org/")
+            g.bind("lok", LOK)
+            g.bind("bbp", BBP)
+            g.bind("sess", SESS)
+            g.bind("schema", SCHEMA)
+            g.bind("org", ORG)
+            g.bind("prov", PROV)
+            g.bind("foaf", FOAF)
+            g.bind("owl", OWL)
+            g.bind("rdf", RDF)
             g.bind("rdfs", RDFS)
+            g.bind("xsd", XSD)
             
             for uri in node_uris[:10]:  # Limit to prevent explosion
                 try:
@@ -1063,7 +1183,7 @@ class ParliamentarySystem:
         except Exception as e:
             logger.error(f"❌ Failed to load prompt.md: {e}")
             # Fallback prompt
-            formatted_prompt = f"""You are Jansetu, an AI assistant for Indian Parliament. 
+            formatted_prompt = f"""You are TrackSabha, an AI assistant for Indian Parliament. 
 Current Date: {current_date}
 
 You must ALWAYS respond with valid JSON in this exact format:
@@ -1086,8 +1206,8 @@ Search for parliamentary information when asked about topics, ministers, debates
 
         # Create the main agent with enhanced tools including graph visualization
         self.agent = LlmAgent(
-            name="Jansetu",
-            model="gemini-2.5-flash-preview-05-20",
+            name="TrackSabha",
+            model="gemini-flash-latest",
             description="AI assistant for Barbados Parliament with cumulative graph memory and visualization",
             planner=BuiltInPlanner(thinking_config=types.ThinkingConfig(thinking_budget=0)),
             instruction=formatted_prompt,
@@ -1111,7 +1231,7 @@ Search for parliamentary information when asked about topics, ministers, debates
         self.runner = Runner(
             agent=self.agent,
             session_service=self.adk_session_service,
-            app_name="Jansetu"
+            app_name="TrackSabha"
         )
     
     def get_or_create_session_graph(self, session_id: str) -> SessionGraphState:
@@ -1360,7 +1480,7 @@ Search for parliamentary information when asked about topics, ministers, debates
                     
                     # Create a fresh ADK session for this interaction
                     adk_session = await self.adk_session_service.create_session(
-                        app_name="Jansetu",
+                        app_name="TrackSabha",
                         user_id=user_id
                     )
                     
@@ -1375,7 +1495,7 @@ Search for parliamentary information when asked about topics, ministers, debates
             
             # Create corresponding ADK session
             adk_session = await self.adk_session_service.create_session(
-                app_name="Jansetu",
+                app_name="TrackSabha",
                 user_id=user_id
             )
             
@@ -1391,7 +1511,7 @@ Search for parliamentary information when asked about topics, ministers, debates
             # Still try to create ADK session
             try:
                 adk_session = await self.adk_session_service.create_session(
-                    app_name="Jansetu",
+                    app_name="TrackSabha",
                     user_id=user_id
                 )
                 return fallback_id, adk_session.id
@@ -1639,7 +1759,7 @@ parliamentary_system = None
 
 def create_system() -> ParliamentarySystem:
     """Create the parliamentary system."""
-    google_api_key = os.getenv('GOOGLE_API_KEY') or os.getenv('GOOGLE_GENAI_API_KEY')
+    google_api_key = os.getenv('GOOGLE_API_KEY') or os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_GENAI_API_KEY')
     
     if not google_api_key:
         raise ValueError("GOOGLE_API_KEY or GOOGLE_GENAI_API_KEY environment variable required")
@@ -1746,7 +1866,7 @@ async def root(request: Request):
 async def api_info():
     """API information endpoint."""
     return {
-        "message": "Jansetu - Enhanced Parliamentary Research API with MongoDB Session Storage and Graph Visualization",
+        "message": "TrackSabha - Enhanced Parliamentary Research API with MongoDB Session Storage and Graph Visualization",
         "status": "running",
         "version": "4.1.0",
         "features": ["mongodb_sessions", "audit_compliant_archiving", "persistent_chat_history", "robust_json_repair", "expandable_cards", "session_graph_persistence", "turtle_processing", "cumulative_memory", "interactive_graph_visualization"]
