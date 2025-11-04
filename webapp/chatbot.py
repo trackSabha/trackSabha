@@ -1923,7 +1923,6 @@ class ParliamentarySystem:
         """Create and configure the LLM agent."""
         search_tool = FunctionTool(
             func=self.querier.get_structured_search_results,
-            description="Search for parliamentary information, including entities, statements, and provenance.",
         )
         
         planner = BuiltInPlanner(
