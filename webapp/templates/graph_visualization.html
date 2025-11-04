@@ -1,0 +1,305 @@
+<div class="graph-visualization" style="border: 1px solid #e5e7eb; border-radius: 0.5rem; margin: 1rem 0; background: white;">
+    <div style="padding: 1rem; border-bottom: 1px solid #e5e7eb; background: #f9fafb;">
+        <h4 style="margin: 0; color: #374151; font-size: 1rem; font-weight: 600;">
+            📊 Session Knowledge Graph
+        </h4>
+        <p style="margin: 0.5rem 0 0 0; font-size: 0.875rem; color: #6b7280;">
+            {{ nodes|length }} entities • {{ edges|length }} relationships • Click and drag to explore
+        </p>
+    </div>
+    
+    <div id="graph-container" style="width: 100%; height: 500px; position: relative; overflow: hidden;">
+        <svg id="knowledge-graph" style="width: 100%; height: 100%; background: #fafbfc;"></svg>
+        
+        <div style="position: absolute; bottom: 10px; left: 10px; background: rgba(255,255,255,0.9); padding: 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; border: 1px solid #e5e7eb;">
+            Scroll to zoom • Drag to pan • Click nodes for details
+        </div>
+        
+        <!-- Node details panel -->
+        <div id="node-details" style="position: absolute; top: 10px; right: 10px; background: rgba(255,255,255,0.95); padding: 1rem; border-radius: 0.5rem; font-size: 0.8rem; border: 1px solid #e5e7eb; max-width: 300px; display: none;">
+            <div id="node-details-content"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    console.log('📊 Initializing graph with', {{ nodes|length }}, 'nodes and', {{ edges|length }}, 'edges');
+    
+    const nodes = {{ nodes|tojson }};
+    const edges = {{ edges|tojson }};
+    
+    console.log('📊 Sample node data:', nodes.slice(0, 2));
+    
+    // Validate data
+    if (nodes.length === 0) {
+        console.error('❌ No nodes to display');
+        return;
+    }
+    
+    // Set up SVG
+    const svg = d3.select("#knowledge-graph");
+    const width = 800;
+    const height = 500;
+    
+    svg.attr("viewBox", [0, 0, width, height]);
+    
+    // Create zoom behavior
+    const zoom = d3.zoom()
+        .scaleExtent([0.1, 4])
+        .on("zoom", function(event) {
+            container.attr("transform", event.transform);
+        });
+    
+    svg.call(zoom);
+    
+    // Create container for all elements
+    const container = svg.append("g");
+    
+    // Simple color scheme - all nodes same color with slight variation
+    const getNodeColor = (d) => {
+        // Use a simple hash of the node ID to get consistent but varied colors
+        const hash = d.id.split('').reduce((a, b) => {
+            a = ((a << 5) - a) + b.charCodeAt(0);
+            return a & a;
+        }, 0);
+        
+        const hue = Math.abs(hash) % 360;
+        return `hsl(${hue}, 60%, 65%)`;
+    };
+    
+    // Calculate node sizes based on number of properties/connections
+    const getNodeSize = (d) => {
+        const propertyCount = Object.keys(d.properties || {}).length;
+        const baseSize = 8;
+        const maxSize = 16;
+        return Math.min(baseSize + propertyCount * 2, maxSize);
+    };
+    
+    // Create force simulation
+    const simulation = d3.forceSimulation(nodes)
+        .force("link", d3.forceLink(edges).id(d => d.id).distance(80))
+        .force("charge", d3.forceManyBody().strength(-300))
+        .force("center", d3.forceCenter(width / 2, height / 2))
+        .force("collision", d3.forceCollide().radius(d => getNodeSize(d) + 5));
+    
+    // Create edges
+    const link = container.append("g")
+        .selectAll("line")
+        .data(edges)
+        .join("line")
+        .attr("stroke", "#94a3b8")
+        .attr("stroke-width", 1)
+        .attr("stroke-opacity", 0.6);
+    
+    // Create edge labels
+    const linkLabels = container.append("g")
+        .selectAll("text")
+        .data(edges)
+        .join("text")
+        .text(d => d.label)
+        .attr("font-size", "9px")
+        .attr("fill", "#64748b")
+        .attr("text-anchor", "middle")
+        .attr("dy", -3)
+        .style("pointer-events", "none")
+        .style("font-weight", "400");
+    
+    // Create nodes
+    const node = container.append("g")
+        .selectAll("circle")
+        .data(nodes)
+        .join("circle")
+        .attr("r", getNodeSize)
+        .attr("fill", getNodeColor)
+        .attr("stroke", "#fff")
+        .attr("stroke-width", 2)
+        .style("cursor", "pointer")
+        .call(d3.drag()
+            .on("start", dragstarted)
+            .on("drag", dragged)
+            .on("end", dragended));
+    
+    // Create node labels
+    const nodeLabels = container.append("g")
+        .selectAll("text")
+        .data(nodes)
+        .join("text")
+        .text(d => d.label)
+        .attr("font-size", "10px")
+        .attr("fill", "#374151")
+        .attr("text-anchor", "middle")
+        .attr("dy", d => getNodeSize(d) + 15)
+        .style("pointer-events", "none")
+        .style("font-weight", "500")
+        .style("text-shadow", "1px 1px 2px rgba(255,255,255,0.8)");
+    
+    console.log('📊 Created', node.size(), 'nodes and', link.size(), 'links');
+    
+    // Node click handler with detailed information
+    node.on("click", function(event, d) {
+        event.stopPropagation();
+        
+        // Show node details panel
+        const detailsPanel = d3.select("#node-details");
+        const detailsContent = d3.select("#node-details-content");
+        
+        let details = `<strong>${d.label}</strong><br/>`;
+        
+        if (d.original_label && d.original_label !== d.label) {
+            details += `<em>Original: ${d.original_label}</em><br/>`;
+        }
+        
+        if (d.name && d.name !== d.label) {
+            details += `<em>Name: ${d.name}</em><br/>`;
+        }
+        
+        if (d.type) {
+            details += `<strong>Type:</strong> ${d.type}<br/>`;
+        }
+        
+        if (d.properties && Object.keys(d.properties).length > 0) {
+            details += `<br/><strong>Properties:</strong><br/>`;
+            for (const [key, value] of Object.entries(d.properties)) {
+                if (value.length > 50) {
+                    details += `• ${key}: ${value.substring(0, 50)}...<br/>`;
+                } else {
+                    details += `• ${key}: ${value}<br/>`;
+                }
+            }
+        }
+        
+        details += `<br/><small>URI: ${d.uri}</small>`;
+        
+        detailsContent.html(details);
+        detailsPanel.style("display", "block");
+        
+        // Highlight connected nodes
+        const connectedNodes = new Set();
+        const connectedEdges = new Set();
+        
+        edges.forEach(edge => {
+            if (edge.source.id === d.id || edge.target.id === d.id) {
+                connectedNodes.add(edge.source.id);
+                connectedNodes.add(edge.target.id);
+                connectedEdges.add(edge);
+            }
+        });
+        
+        // Reset all styles
+        node.attr("stroke-width", 2).attr("opacity", 0.3);
+        link.attr("stroke-opacity", 0.1);
+        nodeLabels.attr("opacity", 0.3);
+        linkLabels.attr("opacity", 0.1);
+        
+        // Highlight connected elements
+        node.filter(n => connectedNodes.has(n.id))
+            .attr("stroke-width", 3)
+            .attr("opacity", 1);
+        
+        link.filter(l => connectedEdges.has(l))
+            .attr("stroke-opacity", 0.8)
+            .attr("stroke-width", 2);
+        
+        nodeLabels.filter(n => connectedNodes.has(n.id))
+            .attr("opacity", 1);
+        
+        linkLabels.filter(l => connectedEdges.has(l))
+            .attr("opacity", 1);
+        
+        console.log("Selected node:", d);
+    });
+    
+    // Hide details panel when clicking elsewhere
+    svg.on("click", function() {
+        d3.select("#node-details").style("display", "none");
+        
+        // Reset highlighting
+        node.attr("stroke-width", 2).attr("opacity", 1);
+        link.attr("stroke-opacity", 0.6).attr("stroke-width", 1);
+        nodeLabels.attr("opacity", 1);
+        linkLabels.attr("opacity", 1);
+    });
+    
+    // Node hover effects
+    node.on("mouseover", function(event, d) {
+        d3.select(this)
+            .attr("stroke-width", 3)
+            .attr("opacity", 0.9);
+    })
+    .on("mouseout", function(event, d) {
+        if (!d3.select("#node-details").style("display") !== "none") {
+            d3.select(this)
+                .attr("stroke-width", 2)
+                .attr("opacity", 1);
+        }
+    });
+    
+    // Update positions on simulation tick
+    simulation.on("tick", () => {
+        link
+            .attr("x1", d => d.source.x)
+            .attr("y1", d => d.source.y)
+            .attr("x2", d => d.target.x)
+            .attr("y2", d => d.target.y);
+        
+        linkLabels
+            .attr("x", d => (d.source.x + d.target.x) / 2)
+            .attr("y", d => (d.source.y + d.target.y) / 2);
+        
+        node
+            .attr("cx", d => d.x)
+            .attr("cy", d => d.y);
+        
+        nodeLabels
+            .attr("x", d => d.x)
+            .attr("y", d => d.y);
+    });
+    
+    // Drag functions
+    function dragstarted(event, d) {
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+    }
+    
+    function dragged(event, d) {
+        d.fx = event.x;
+        d.fy = event.y;
+    }
+    
+    function dragended(event, d) {
+        if (!event.active) simulation.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
+    }
+    
+    // Initial zoom to fit content
+    setTimeout(() => {
+        try {
+            const bounds = container.node().getBBox();
+            if (bounds.width && bounds.height) {
+                const fullWidth = width;
+                const fullHeight = height;
+                const scale = Math.min(
+                    fullWidth / (bounds.width + 100), 
+                    fullHeight / (bounds.height + 100)
+                ) * 0.8;
+                const translate = [
+                    fullWidth / 2 - scale * (bounds.x + bounds.width / 2),
+                    fullHeight / 2 - scale * (bounds.y + bounds.height / 2)
+                ];
+                
+                svg.transition().duration(1000).call(
+                    zoom.transform,
+                    d3.zoomIdentity.translate(translate[0], translate[1]).scale(scale)
+                );
+            }
+            
+            console.log('✅ Graph layout complete');
+        } catch (e) {
+            console.warn('⚠️ Auto-zoom failed:', e);
+        }
+    }, 1500);
+})();
+</script>

@@ -558,7 +558,7 @@ class GraphQuerier:
         # Create new RDF graph
         graph = Graph()
         
-        # Bind prefixes for the Barbados Parliament ontology
+        # Bind prefixes for the Indian Parliament ontology
         LOK = Namespace("http://example.com/Indian-parliament-ontology#")
         SESS = Namespace("http://example.com/Indian-parliament-session/")
         SCHEMA = Namespace("http://schema.org/")
