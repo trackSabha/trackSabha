@@ -2138,7 +2138,7 @@ if __name__ == "__main__":
     logger.info("🔧 New: Interactive knowledge graph visualization with D3.js")
     
     uvicorn.run(
-        "jansetu:app",
+        "app:app",
         host="0.0.0.0",
         port=port,
         reload=True

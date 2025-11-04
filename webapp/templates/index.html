@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>YuhHearDem</title>
+    <title>TrackSabha</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <!-- Load D3.js globally to ensure it's always available -->
@@ -14,9 +14,15 @@
     <header class="bg-gradient-to-r from-white via-gray-50 to-white border-b border-gray-200 text-gray-800 shadow-xl">
         <div class="container mx-auto px-4 py-4">
             <div class="flex items-center justify-between">
-                <div>
-                    <h1 class="text-3xl font-bold text-gray-900">YuhHearDem</h1>
-                    <p class="text-gray-600 mt-1">No more long talk - get straight to what dey really say</p>
+                <div class="flex items-center space-x-4">
+                    <!-- Emblem Image -->
+                    <img src="https://img.favpng.com/5/14/10/lion-capital-of-ashoka-state-emblem-of-india-national-symbols-of-india-national-emblem-png-favpng-NmUVz497phA7W30xu8krE08Dt.jpg" 
+                         alt="Indian Emblem" class="h-12 w-auto" />
+
+                    <div>
+                        <h1 class="text-3xl font-bold text-gray-900">TrackSabha</h1>
+                        <p class="text-gray-600 mt-1">Transparency Accountability Empowerment</p>
+                    </div>
                 </div>
                 <div class="flex items-center space-x-4">
                     <div id="connectionStatus" class="flex items-center">
@@ -39,31 +45,32 @@
                             <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
                             </svg>
-                            Ask About Barbadian Politics
+                            Ask About Indian Politics
                         </h2>
                         <p class="text-gray-800 mb-2">
-                            Hey! I'm YuhHearDem<img src="https://flagcdn.com/w20/bb.png" alt="Barbados Flag" style="width: 20px; height: 14px; display: inline-block; margin-left: 4px;"> Your AI guide to what's happening in Barbados' Parliament. From debates to decisions, I'm here to help you stay informed and involved. Ask me anything — it's your right to know!
+                            Hey! I'm TrackSabha<img src="https://flagcdn.com/w20/in.png" alt="Indian Flag" style="width: 20px; height: 14px; display: inline-block; margin-left: 4px;"> Your AI guide to what's happening in Indian' Parliament. From debates to decisions, I'm here to help you stay informed and involved. Ask me anything — it's your right to know!
                         </p>
-                        <p class="text-gray-600 text-sm mb-2"><strong>Examples:</strong> "What did the Minister of Health say about COVID-19?" or "Recent discussions about water management"</p>
+                        <p class="text-gray-600 text-sm mb-2"><strong>Examples:</strong> "What did the Finance Minister say about Income Tax Bill?" or "Recent discussions about agricultural education"</p>
 
                         
                         <!-- Colorful Starter Prompts -->
                         <div class="starter-prompts">
-                            <button class="starter-prompt-btn healthcare" onclick="sendSuggestion('What did the Minister of Health say recently?')">
-                                🏥 Healthcare Policy
+                            <button class="starter-prompt-btn debates" onclick="sendSuggestion('What are the latest parliamentary debates?')">
+                                🏛️ Recent Debates
                             </button>
-                            <button class="starter-prompt-btn water" onclick="sendSuggestion('Recent discussions about water management')">
-                                💧 Water Management
+                            <button class="starter-prompt-btn healthcare" onclick="sendSuggestion('What bills were discussed about finances recently?')">
+                                💸 Finances
                             </button>
-                            <button class="starter-prompt-btn tourism" onclick="sendSuggestion('What bills were discussed about tourism development?')">
-                                🏖️ Tourism Development
+                            <button class="starter-prompt-btn water" onclick="sendSuggestion('Recent discussions about education policies or educational intitutes.')">
+                                🎓 Education
+                            </button>
+                            <button class="starter-prompt-btn tourism" onclick="sendSuggestion('What bills or policies were discussed about Agriculture?')">
+                                🌾 Agriculture
                             </button>
                             <button class="starter-prompt-btn economic" onclick="sendSuggestion('Recent parliamentary debates on economic reform')">
                                 📈 Economic Reform
                             </button>
-                            <button class="starter-prompt-btn debates" onclick="sendSuggestion('What are the latest parliamentary debates?')">
-                                🏛️ Recent Debates
-                            </button>
+                            
                         </div>
                     </div>
                 </div>
