@@ -14,6 +14,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, asdict
 from pymongo import MongoClient, ASCENDING, DESCENDING
 from pymongo.errors import PyMongoError
+from google.genai.types import Content, Part
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +178,16 @@ class MongoSessionManager:
             logger.error(f"❌ Failed to create session: {e}")
             raise
     
+    async def ensure_session(self, user_id: str, session_id: Optional[str] = None) -> ChatSession:
+        """Ensure a session exists, creating one if necessary."""
+        if session_id:
+            session = await self.get_session(session_id)
+            if session:
+                return session
+        
+        # If no session_id or session not found, create a new one
+        return await self.create_session(user_id)
+
     async def get_session(self, session_id: str) -> Optional[ChatSession]:
         """Retrieve a chat session by ID."""
         try:
@@ -267,6 +278,18 @@ class MongoSessionManager:
         except PyMongoError as e:
             logger.error(f"❌ Failed to retrieve session messages: {e}")
             return []
+
+    async def get_history_as_content(self, session_id: str, limit: int = 10) -> List['Content']:
+        """Get session history from MongoDB as a list of Content objects for the ADK."""
+        messages = await self.get_session_messages(session_id, limit)
+        history = []
+        for msg in messages:
+            # The ADK expects 'user' and 'model' roles.
+            role = "model" if msg.role == "assistant" else "user"
+            history.append({'role': role, 'parts': [{'text': msg.content}]})
+        
+        # Convert dicts to Content objects
+        return [Content.from_dict(h) for h in history]
     
     async def update_session_metadata(self, session_id: str, metadata: Dict[str, Any]) -> bool:
         """Update session metadata."""
