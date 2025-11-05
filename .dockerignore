@@ -1,0 +1,26 @@
+# Python/Docker ignores
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Git
+.git
+
+# Editor temporary files
+*.swp
+*.swo
+.DS_Store
+
+# Large project data not needed in image
+transcripts/
+
+# Node/static build artifacts (if any)
+node_modules/

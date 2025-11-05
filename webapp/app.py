@@ -2131,7 +2131,7 @@ async def archive_old_sessions(days_old: int = 365):
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))
+    port = int(os.getenv("PORT", 8000))
     logger.info("🚀 Starting Enhanced Parliamentary Chatbot with MongoDB Session Storage and Graph Visualization")
     logger.info(f"📡 Server will run on 0.0.0.0:{port}")
     logger.info("📋 Required: GOOGLE_API_KEY, MONGODB_CONNECTION_STRING")
@@ -2141,5 +2141,5 @@ if __name__ == "__main__":
         "app:app",
         host="0.0.0.0",
         port=port,
-        reload=True
+        #reload=True
     )
