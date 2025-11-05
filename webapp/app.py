@@ -39,6 +39,7 @@ from rdflib.namespace import RDF, RDFS, FOAF, OWL, XSD
 # Markdown processing
 import markdown
 from bs4 import BeautifulSoup
+import html
 
 # JSON repair
 from json_repair import repair_json
@@ -46,6 +47,7 @@ from json_repair import repair_json
 # Mount static files and templates
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pathlib import Path
 import pytz
 
 # Import our new session manager
@@ -56,6 +58,12 @@ load_dotenv()
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Resolve important filesystem paths relative to this file
+BASE_DIR = Path(__file__).resolve().parent
+TEMPLATES_DIR = BASE_DIR / "templates"
+STATIC_DIR = BASE_DIR / "static"
+PROMPT_PATH = BASE_DIR / "prompt.md"
 
 # RDF Namespaces
 LOK = Namespace("http://example.com/Indian-parliament-ontology#")
@@ -1019,7 +1027,11 @@ def convert_structured_response_to_html(structured_response: StructuredResponse,
         html_parts.append('<ul class="suggestions-list">')
         
         for suggestion in structured_response.follow_up_suggestions:
-            html_parts.append(f'<li class="suggestion-item" onclick="sendSuggestion(\'{suggestion}\')">{suggestion}</li>')
+            safe_text = html.escape(str(suggestion))
+            safe_attr = html.escape(str(suggestion), quote=True)
+            html_parts.append(
+                f'<li class="suggestion-item" data-suggestion="{safe_attr}" onclick="sendSuggestion(this.dataset.suggestion)">{safe_text}</li>'
+            )
         
         html_parts.append('</ul>')
         html_parts.append('</div>')
@@ -1174,7 +1186,7 @@ class ParliamentarySystem:
 
         # Read and format the prompt safely
         try:
-            with open("prompt.md", "r", encoding="utf-8") as f:
+            with open(PROMPT_PATH, "r", encoding="utf-8") as f:
                 prompt_content = f.read()
             
             # Replace only the specific current_date placeholder, not any other braces
@@ -1423,7 +1435,7 @@ Search for parliamentary information when asked about topics, ministers, debates
             
             # Load and render template
             from jinja2 import Environment, FileSystemLoader
-            env = Environment(loader=FileSystemLoader('templates'))
+            env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)))
             template = env.get_template('graph_visualization.html')
             
             html_content = template.render(
@@ -1559,6 +1571,21 @@ Search for parliamentary information when asked about topics, ministers, debates
             
             # Get session graph
             session_graph = self.get_or_create_session_graph(tracking_session_id)
+
+            # Proactively seed/update the session graph so visualization works after first Q
+            try:
+                seeds = self.querier.unified_hybrid_search(query, limit=6)
+                seed_uris = {item["uri"] for item in seeds if "uri" in item}
+                if seed_uris:
+                    connected = self.querier.get_connected_nodes(seed_uris, hops=1)
+                    subgraph = self.querier.get_subgraph(connected)
+                    turtle_data = self.querier.to_turtle(subgraph)
+                    main_data = turtle_data.split("# PROVENANCE DATA:")[0].strip()
+                    if main_data and not main_data.startswith("# Error"):
+                        session_graph.add_turtle_data(main_data)
+                        logger.info("📈 Seeded session graph for visualization")
+            except Exception as e:
+                logger.warning(f"Graph seeding skipped: {e}")
             
             # Build context from MongoDB conversation history AND session graph
             context = await self.build_conversation_context(tracking_session_id)
@@ -1598,7 +1625,7 @@ Search for parliamentary information when asked about topics, ministers, debates
                 logger.error(f"ADK Runner failed: {runner_error}")
                 # Clear session context on error
                 self.current_session_id = None
-                return f"I encountered a technical issue processing your query. Please try again.", {"success": False}
+                return "I encountered a technical issue processing your query. Please try again.", {"success": False}
             
             # Now process events and get the final response only
             response_text = ""
@@ -1627,7 +1654,8 @@ Search for parliamentary information when asked about topics, ministers, debates
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "message_id": message_id,
                         "response_type": "structured",
-                        "graph_stats": session_graph.get_stats()
+                        "graph_stats": session_graph.get_stats(),
+                        "rendered_html": html_response
                     }
                 )
                 
@@ -1671,7 +1699,8 @@ Search for parliamentary information when asked about topics, ministers, debates
                     metadata={
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "response_type": "fallback_error",
-                        "graph_stats": session_graph.get_stats()
+                        "graph_stats": session_graph.get_stats(),
+                        "rendered_html": html_response
                     }
                 )
                 
@@ -1754,6 +1783,17 @@ Search for parliamentary information when asked about topics, ministers, debates
         if hasattr(self, 'session_manager'):
             self.session_manager.close()
 
+    # --- API helpers for session graph management ---
+    def api_clear_session_graph(self, session_id: str, reason: str = "API request") -> Dict[str, Any]:
+        """Clear a session's in-memory knowledge graph and return stats before/after."""
+        if session_id not in self.session_graphs:
+            return {"cleared": False, "reason": "Session graph not found"}
+        sg = self.session_graphs[session_id]
+        before = sg.get_stats()
+        sg.clear_graph(reason)
+        after = sg.get_stats()
+        return {"cleared": True, "before": before, "after": after, "reason": reason}
+
 # Global system instance
 parliamentary_system = None
 
@@ -1798,10 +1838,10 @@ app = FastAPI(
 )
 
 # Mount static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # Setup templates
-templates = Jinja2Templates(directory="templates")
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 # CORS middleware
 app.add_middleware(
@@ -1829,6 +1869,11 @@ def format_sse_event(event_type: str, agent: str, message: str, data: Optional[D
 async def process_query_with_events(query: str, user_id: str, session_id: str):
     """Process query with real-time events."""
     try:
+        # Emit an early session_ready so the client can sync sessionId immediately
+        yield format_sse_event("session_ready", "System", "Session initialized", {
+            "session_id": session_id
+        })
+
         yield format_sse_event("query_start", "System", f"Processing query: {query[:50]}...")
         
         response_text, status = await parliamentary_system.process_query(query, user_id, session_id)
@@ -1885,7 +1930,7 @@ async def health_check():
         # Test graph database connection
         parliamentary_system.querier.client.admin.command("ping", maxTimeMS=3000)
         graph_db_connected = True
-    except Exception as e:
+    except Exception:
         graph_db_connected = False
     
     try:
@@ -1984,16 +2029,78 @@ async def get_session_graph(session_id: str):
 @app.get("/session/{session_id}/graph/visualize")
 async def visualize_session_graph(session_id: str):
     """Get the session graph as interactive HTML visualization."""
+    def render_info_page(title: str, message: str, tips: list[str] = None) -> str:
+        tips = tips or []
+        tips_html = "".join([f"<li>{t}</li>" for t in tips])
+        list_html = f'<ul style="margin:10px 0 0 18px; color:#334155;">{tips_html}</ul>' if tips_html else ''
+        # Return a fragment suitable for embedding inside the panel
+        return (
+            f'<div class="graph-info-message" style="border:1px solid #e2e8f0; border-radius:12px; padding:16px; background:#ffffff;">'
+            f'<div style="font-weight:600; font-size:14px; color:#0f172a;">{title}</div>'
+            f'<div style="color:#475569; margin-top:6px;">{message}</div>'
+            f'{list_html}'
+            f'<div style="margin-top:12px; display:flex; gap:8px;">'
+            f'<a href="#" onclick="location.reload(); return false;" style="display:inline-block; background:#0ea5e9; color:#fff; padding:6px 10px; border-radius:8px; text-decoration:none; font-size:12px;">Refresh</a>'
+            f'<a href="/" style="display:inline-block; background:#64748b; color:#fff; padding:6px 10px; border-radius:8px; text-decoration:none; font-size:12px; margin-left:8px;">Back to Home</a>'
+            f'</div>'
+            f'</div>'
+        )
+
     if not parliamentary_system:
-        raise HTTPException(status_code=503, detail="System not initialized")
+        # Return a friendly HTML page and a 503 so client can display a clear error
+        return HTMLResponse(content=render_info_page(
+            title="System not initialized",
+            message="The backend system isn't ready yet. Please wait a moment and try again.",
+            tips=[
+                "Ensure the server process has started successfully.",
+                "Check environment variables for database/API keys.",
+            ],
+        ), status_code=503)
     
     try:
+        # Helpful guards for missing/empty graphs
+        sg = parliamentary_system.session_graphs.get(session_id)
+        if sg is None:
+            return HTMLResponse(content=render_info_page(
+                title="No graph found for this session",
+                message=f"We couldn't find an in-memory knowledge graph for session <code>{session_id}</code>.",
+                tips=[
+                    "Start by asking a question to seed the session graph.",
+                    "Make sure you passed the correct session_id from the chat response.",
+                    "The graph is built incrementally as you search or ask questions.",
+                ],
+            ), status_code=404)
+
+        if getattr(sg, 'edge_count', 0) == 0:
+            return HTMLResponse(content=render_info_page(
+                title="Session graph is empty",
+                message="This session exists but doesn't have any relationships yet to visualize.",
+                tips=[
+                    "Ask a question about entities, people, or bills to populate the graph.",
+                    "The system attempts to seed graph context on your first query.",
+                    "After a query completes, click Refresh to update the view.",
+                ],
+            ), status_code=404)
+
         html_content = parliamentary_system.visualize_session_graph(session_id)
         return HTMLResponse(content=html_content)
         
     except Exception as e:
         logger.error(f"Failed to visualize session graph: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return HTMLResponse(content=render_info_page(
+            title="Graph visualization error",
+            message="We hit an unexpected error while creating the visualization.",
+            tips=[
+                "Try refreshing this page.",
+                "Run one more query, then refresh again.",
+                "Check server logs for details if the issue persists.",
+            ],
+        ), status_code=500)
+
+@app.get("/session/{session_id}/graph/refresh")
+async def refresh_session_graph(session_id: str):
+    """Alias to visualize the session graph (convenience for clients)."""
+    return await visualize_session_graph(session_id)
 
 @app.get("/user/{user_id}/sessions")
 async def get_user_sessions(user_id: str, limit: int = 10, include_archived: bool = False):
@@ -2035,6 +2142,27 @@ async def archive_session(session_id: str, reason: str = "User requested"):
         raise
     except Exception as e:
         logger.error(f"Failed to archive session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/session/{session_id}/graph/clear")
+async def clear_session_graph_api(session_id: str, reason: str = "User requested"):
+    """Clear a session's in-memory knowledge graph and return before/after stats."""
+    if not parliamentary_system:
+        raise HTTPException(status_code=503, detail="System not initialized")
+
+    try:
+        result = parliamentary_system.api_clear_session_graph(session_id, reason)
+        if not result.get("cleared"):
+            raise HTTPException(status_code=404, detail=result.get("reason", "Session graph not found"))
+        return {
+            "message": f"Session {session_id} graph cleared",
+            "reason": reason,
+            **result
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to clear session graph: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/query", response_model=QueryResponse)

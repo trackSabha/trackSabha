@@ -1,4 +1,4 @@
-// YuhHearDem Chat Application with Independent Graph Visualizations
+// tracksabha Chat Application with Independent Graph Visualizations
 function generateUUID() {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
         var r = Math.random() * 16 | 0;
@@ -49,6 +49,7 @@ var chatApp = {
     isProcessing: false,
     currentThinkingDots: null,
     messageCounter: 0,
+    skipLocalSave: false,
     
     // DOM elements
     elements: {
@@ -57,11 +58,67 @@ var chatApp = {
         sendButton: null,
         inputStatus: null,
         connectionStatus: null,
-        clearButton: null
+        clearButton: null,
+        showGraphButton: null,
+        refreshGraphButton: null,
+        hideGraphButton: null,
+        graphSection: null,
+        graphPanel: null,
+        graphMeta: null
     },
     
+    // --- Local persistence helpers ---
+    localKey: function() {
+        return 'tracksabha_chat_' + this.sessionId;
+    },
+    loadLocalChat: function() {
+        try {
+            var raw = localStorage.getItem(this.localKey());
+            if (!raw) return;
+            var items = JSON.parse(raw);
+            if (!Array.isArray(items) || !items.length) return;
+            console.log('📥 Restoring', items.length, 'messages from local cache');
+            this.skipLocalSave = true;
+            for (var i=0; i<items.length; i++) {
+                var m = items[i] || {};
+                if (m.role === 'user') {
+                    this.addMessage('user', m.content || '');
+                } else if (m.role === 'assistant') {
+                    this.addMessage('assistant', m.content || '');
+                }
+            }
+            this.skipLocalSave = false;
+        } catch (e) {
+            console.warn('Local chat restore failed:', e);
+        }
+    },
+    saveMessageToLocal: function(msg) {
+        try {
+            var key = this.localKey();
+            var raw = localStorage.getItem(key);
+            var arr = [];
+            if (raw) { try { arr = JSON.parse(raw) || []; } catch(_){} }
+            arr.push({ role: msg.role, content: msg.content, at: msg.at || Date.now() });
+            localStorage.setItem(key, JSON.stringify(arr));
+        } catch (e) {
+            console.warn('Local chat save failed:', e);
+        }
+    },
+    rewriteLocalFromServer: function(serverMessages) {
+        try {
+            var arr = [];
+            for (var i=0; i<serverMessages.length; i++) {
+                var m = serverMessages[i];
+                arr.push({ role: m.role, content: m.content, at: Date.parse(m.timestamp) || Date.now() });
+            }
+            localStorage.setItem(this.localKey(), JSON.stringify(arr));
+        } catch (e) {
+            console.warn('Local chat rewrite failed:', e);
+        }
+    },
+
     init: function() {
-        console.log('🔧 Initializing YuhHearDem chat with expandable cards and independent graph visualization...');
+        console.log('🔧 Initializing Tracksabha chat with expandable cards and independent graph visualization...');
         console.log('📊 D3.js version:', typeof d3 !== 'undefined' ? d3.version : 'Not loaded');
         
         this.initializeSession();
@@ -69,6 +126,10 @@ var chatApp = {
         this.displaySessionInfo();
         this.testConnection();
         this.setupEventListeners();
+        // Show graph section by default
+        this.showGraphPanel();
+        // Fast UX: render any locally cached chat immediately
+        this.loadLocalChat();
     },
     
     cacheElements: function() {
@@ -78,11 +139,17 @@ var chatApp = {
         this.elements.inputStatus = document.getElementById('inputStatus');
         this.elements.connectionStatus = document.getElementById('connectionStatus');
         this.elements.clearButton = document.getElementById('clearChat');
+        this.elements.showGraphButton = document.getElementById('showGraph');
+        this.elements.refreshGraphButton = document.getElementById('refreshGraph');
+        this.elements.hideGraphButton = document.getElementById('hideGraph');
+        this.elements.graphSection = document.getElementById('graphSection');
+        this.elements.graphPanel = document.getElementById('graphPanel');
+        this.elements.graphMeta = document.getElementById('graphMeta');
     },
     
     initializeSession: function() {
-        var existingUserId = sessionStorage.getItem('yuhheardem_user_id');
-        var existingSessionId = sessionStorage.getItem('yuhheardem_session_id');
+        var existingUserId = sessionStorage.getItem('tracksabha_user_id');
+        var existingSessionId = sessionStorage.getItem('tracksabha_session_id');
         
         if (existingUserId && existingSessionId) {
             this.userId = existingUserId;
@@ -92,8 +159,8 @@ var chatApp = {
             this.userId = generateUUID();
             this.sessionId = generateUUID();
             
-            sessionStorage.setItem('yuhheardem_user_id', this.userId);
-            sessionStorage.setItem('yuhheardem_session_id', this.sessionId);
+            sessionStorage.setItem('tracksabha_user_id', this.userId);
+            sessionStorage.setItem('tracksabha_session_id', this.sessionId);
             this.setSessionStatus('New Session', 'new');
         }
     },
@@ -138,6 +205,10 @@ var chatApp = {
                     self.setConnectionStatus(true);
                     self.enableInput();
                     self.elements.inputStatus.textContent = 'Ready! Ask me about parliamentary discussions.';
+                    // After connection, load previous messages for this session
+                    self.loadSessionHistory();
+                    // And load graph immediately
+                    self.refreshGraphPanel();
                 } else {
                     throw new Error('Service not healthy: ' + health.status);
                 }
@@ -166,6 +237,21 @@ var chatApp = {
         this.elements.clearButton.addEventListener('click', function() {
             self.clearChat();
         });
+
+        // Graph controls
+        if (this.elements.showGraphButton) {
+            // Hide the button; graph is always visible now
+            this.elements.showGraphButton.classList.add('hidden');
+        }
+        if (this.elements.refreshGraphButton) {
+            // Hide the header refresh button; panel manages itself
+            this.elements.refreshGraphButton.classList.add('hidden');
+        }
+        if (this.elements.hideGraphButton) {
+            this.elements.hideGraphButton.addEventListener('click', function() {
+                self.hideGraphPanel();
+            });
+        }
     },
     
     setConnectionStatus: function(connected) {
@@ -359,6 +445,13 @@ var chatApp = {
                                 // Handle final response
                                 if (eventData.type === 'response_ready' && eventData.data && eventData.data.response) {
                                     console.log('✅ Got final response, type:', eventData.data.response_type);
+                                    // Sync sessionId with server-assigned value so graph endpoints work
+                                    if (eventData.data.session_id && eventData.data.session_id !== self.sessionId) {
+                                        self.sessionId = eventData.data.session_id;
+                                        sessionStorage.setItem('tracksabha_session_id', self.sessionId);
+                                        self.displaySessionInfo();
+                                        console.log('🔗 Updated sessionId from server:', self.sessionId);
+                                    }
                                     self.hideThinkingDots();
                                     
                                     // Check if we have structured response
@@ -369,6 +462,12 @@ var chatApp = {
                                         console.log('📄 Processing fallback response');
                                         self.addMessage('assistant', eventData.data.response);
                                     }
+
+                                    // Auto-refresh graph panel after each answer
+                                    self.refreshGraphPanel();
+
+                                    // Also insert the latest graph inline as a message
+                                    self.insertGraphInlineMessage();
                                     
                                 } else if (eventData.type === 'error') {
                                     console.log('❌ Got error');
@@ -398,6 +497,115 @@ var chatApp = {
             self.enableInput();
         });
     },
+
+    // Load previous messages from the server for this session
+    loadSessionHistory: function() {
+        var self = this;
+        var url = this.apiBase + '/session/' + this.sessionId + '/messages?limit=50';
+        console.log('📜 Loading session history from', url);
+        fetch(url)
+            .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
+            .then(function(data){
+                if (!data || !Array.isArray(data.messages)) return;
+                // Replace UI with server truth
+                self.elements.chatContainer.innerHTML = '';
+                self.messageCounter = 0;
+                var ordered = data.messages.slice();
+                ordered.forEach(function(m){
+                    if (m.role === 'user') {
+                        self.addMessage('user', m.content || '');
+                    } else if (m.role === 'assistant') {
+                        var rendered = self.renderAssistantContent(m.content, m.metadata || {});
+                        self.addMessage('assistant', rendered);
+                    }
+                });
+                // Rewrite local cache based on server data
+                self.rewriteLocalFromServer(ordered);
+                self.scrollToBottom();
+            })
+            .catch(function(err){ console.warn('History load failed:', err); });
+    },
+
+    // Render assistant content: try structured JSON else markdown
+    renderAssistantContent: function(content, metadata) {
+        // If server provided rendered HTML, prefer it
+        if (metadata && metadata.rendered_html) {
+            return metadata.rendered_html;
+        }
+        try {
+            var trimmed = (content || '').trim();
+            if (trimmed.startsWith('{')) {
+                var parsed = JSON.parse(trimmed);
+                if (parsed && parsed.intro_message && Array.isArray(parsed.response_cards)) {
+                    return this.renderStructuredHtml(parsed);
+                }
+            }
+        } catch (e) {
+            // fall through to markdown
+        }
+        try {
+            marked.setOptions({ breaks: true, gfm: true, sanitize: false });
+            return marked.parse(content || '');
+        } catch (e) {
+            return this.escapeHtml(content || '').replace(/\n/g,'<br>');
+        }
+    },
+
+    // Minimal client-side structured renderer
+    renderStructuredHtml: function(sr) {
+        var html = '';
+        var intro = this.escapeHtml(sr.intro_message || '');
+        html += '<div class="intro-message">' + intro + '</div>';
+        html += '<div class="response-cards">';
+        (sr.response_cards || []).forEach(function(card, i){
+            var summary = (card && card.summary) ? card.summary : 'Details';
+            var detailsMd = (card && card.details) ? card.details : '';
+            var detailsHtml;
+            try { detailsHtml = marked.parse(detailsMd); } catch(e){ detailsHtml = detailsMd; }
+            var cardId = 'hist-card-' + Date.now() + '-' + i;
+            html += '\n<div class="response-card" data-card-id="' + cardId + '">\n' +
+                    '  <div class="card-header" onclick="toggleCard(\'' + cardId + '\')">\n' +
+                    '    <div class="card-summary">' + summary + '</div>\n' +
+                    '    <div class="card-toggle"><span class="toggle-icon">▼</span></div>\n' +
+                    '  </div>\n' +
+                    '  <div class="card-details collapsed" id="' + cardId + '-details">\n' +
+                    '    <div class="card-content">' + detailsHtml + '</div>\n' +
+                    '  </div>\n' +
+                    '</div>';
+        });
+        html += '</div>';
+        if (Array.isArray(sr.follow_up_suggestions) && sr.follow_up_suggestions.length) {
+            html += '<div class="follow-up-suggestions"><h4>Follow-up questions:</h4><ul class="suggestions-list">';
+            sr.follow_up_suggestions.forEach(function(s){
+                var text = (''+s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+                html += '<li class="suggestion-item" data-suggestion="' + text + '" onclick="sendSuggestion(this.dataset.suggestion)">' + text + '</li>';
+            });
+            html += '</ul></div>';
+        }
+        return html;
+    },
+
+    // Fetch graph HTML and insert below the last assistant message
+    insertGraphInlineMessage: function() {
+        var self = this;
+        var graphUrl = this.apiBase + '/session/' + this.sessionId + '/graph/visualize';
+        console.log('🧩 Inserting inline graph from', graphUrl);
+        fetch(graphUrl, { method:'GET', headers:{ 'Accept':'text/html' } })
+            .then(function(r){ return r.text().then(function(t){ return { status:r.status, ok:r.ok, text:t }; }); })
+            .then(function(htmlContent){
+                if (!htmlContent || !htmlContent.text) return;
+                var ts = Date.now();
+                var uniqueGraphId = 'knowledge-graph-inline-' + ts;
+                var uniqueContainerId = 'graph-container-inline-' + ts;
+                var updated = htmlContent.text
+                    .replace(/id="knowledge-graph"/g, 'id="' + uniqueGraphId + '"')
+                    .replace(/id="graph-container"/g, 'id="' + uniqueContainerId + '"')
+                    .replace(/#knowledge-graph/g, '#' + uniqueGraphId)
+                    .replace(/#graph-container/g, '#' + uniqueContainerId);
+                self.addMessage('assistant', updated);
+            })
+            .catch(function(err){ console.warn('Inline graph insert failed:', err.message); });
+    },
     
     addStructuredMessage: function(structuredResponse, htmlContent) {
         console.log('💬 Adding structured message with cards');
@@ -424,7 +632,7 @@ var chatApp = {
                 '</div>' +
             '</div>';
         
-        this.elements.chatContainer.appendChild(messageDiv);
+    this.elements.chatContainer.appendChild(messageDiv);
         
         // Make YouTube links open in new window
         var youtubeLinks = messageDiv.querySelectorAll('a[href*="youtube.com"], a[href*="youtu.be"]');
@@ -436,6 +644,89 @@ var chatApp = {
         this.scrollToBottom();
         
         return messageDiv;
+    },
+
+    // --- Graph Panel helpers ---
+    showGraphPanel: function() {
+        if (this.elements.graphSection) {
+            this.elements.graphSection.classList.remove('hidden');
+        }
+        if (this.elements.refreshGraphButton) {
+            this.elements.refreshGraphButton.classList.remove('hidden');
+        }
+    },
+
+    hideGraphPanel: function() {
+        if (this.elements.graphSection) {
+            this.elements.graphSection.classList.add('hidden');
+        }
+    },
+
+    refreshGraphPanel: function() {
+        var self = this;
+        if (!this.elements.graphPanel) return;
+
+        // Ensure the section is visible when refreshing
+        this.showGraphPanel();
+
+        var graphUrl = this.apiBase + '/session/' + this.sessionId + '/graph/visualize';
+        console.log('📡 Refreshing graph panel for session:', this.sessionId, 'URL:', graphUrl);
+        this.elements.graphMeta.textContent = ' • loading…';
+
+        fetch(graphUrl, { method: 'GET', headers: { 'Accept': 'text/html' } })
+            .then(function(response) {
+                console.log('📡 Graph fetch status:', response.status);
+                if (!response.ok) {
+                    // Provide clearer UX when the server has no graph for this session yet
+                    if (response.status === 404) {
+                        throw new Error('No graph yet for this session. Ask a question first, then refresh.');
+                    }
+                    throw new Error('HTTP ' + response.status);
+                }
+                return response.text();
+            })
+            .then(function(htmlContent) {
+                console.log('📡 Graph HTML length:', htmlContent ? htmlContent.length : 0);
+                // Generate unique IDs to avoid collisions
+                var ts = Date.now();
+                var uniqueGraphId = 'knowledge-graph-panel-' + ts;
+                var uniqueContainerId = 'graph-container-panel-' + ts;
+                var updated = htmlContent
+                    .replace(/id="knowledge-graph"/g, 'id="' + uniqueGraphId + '"')
+                    .replace(/id="graph-container"/g, 'id="' + uniqueContainerId + '"')
+                    .replace(/#knowledge-graph/g, '#' + uniqueGraphId)
+                    .replace(/#graph-container/g, '#' + uniqueContainerId);
+
+                self.elements.graphPanel.innerHTML = updated;
+
+                // Execute any inline scripts within the panel content
+                setTimeout(function() {
+                    try {
+                        if (typeof d3 === 'undefined') {
+                            console.error('❌ D3.js not loaded for panel rendering');
+                            return;
+                        }
+                        var scripts = self.elements.graphPanel.querySelectorAll('script');
+                        for (var i = 0; i < scripts.length; i++) {
+                            var code = scripts[i].textContent;
+                            if (code && !code.includes('d3.min.js')) {
+                                try { eval(code); } catch (e) { console.error('Panel script error:', e); }
+                            }
+                        }
+                        // Update meta with basic stats if present in DOM
+                        var label = self.elements.graphPanel.querySelector('.graph-visualization h4');
+                        self.elements.graphMeta.textContent = '';
+                    } catch (e) {
+                        console.error('Graph panel render error:', e);
+                        self.elements.graphMeta.textContent = ' • error rendering';
+                    }
+                }, 50);
+            })
+            .catch(function(err) {
+                console.error('Graph panel fetch failed:', err);
+                self.elements.graphPanel.innerHTML = '<div class="text-sm text-red-600">Failed to load graph: ' + self.escapeHtml(err.message) + '</div>';
+                self.elements.graphMeta.textContent = ' • failed';
+            });
     },
     
     // Enhanced addMessage function with proper script execution
@@ -565,6 +856,11 @@ var chatApp = {
             }
         }
         
+        // Persist to local cache unless we're replaying
+        if (!this.skipLocalSave) {
+            this.saveMessageToLocal({ role: sender, content: content, at: Date.now() });
+        }
+
         this.scrollToBottom();
         return messageDiv;
     },
@@ -583,21 +879,12 @@ var chatApp = {
     },
     
     clearChat: function() {
-        // Clear all messages
+        // Clear UI and local cache but preserve session IDs
         this.elements.chatContainer.innerHTML = '';
-        
-        // Reset message counter
         this.messageCounter = 0;
-        
-        this.userId = generateUUID();
-        this.sessionId = generateUUID();
-        
-        sessionStorage.setItem('yuhheardem_user_id', this.userId);
-        sessionStorage.setItem('yuhheardem_session_id', this.sessionId);
-        
+        try { localStorage.removeItem(this.localKey()); } catch(_){ }
         this.displaySessionInfo();
-        this.setSessionStatus('New Session', 'new');
-        
+        this.setSessionStatus('Cleared', 'new');
         this.elements.queryInput.focus();
     }
 };
