@@ -8,16 +8,19 @@ if (!window.d3) {
 </script>
 
 <div class="graph-visualization" style="border: 1px solid #e5e7eb; border-radius: 0.5rem; margin: 1rem 0; background: white;">
-    <div style="padding: 1rem; border-bottom: 1px solid #e5e7eb; background: #f9fafb;">
-        <h4 style="margin: 0; color: #374151; font-size: 1rem; font-weight: 600;">
-            📊 Session Knowledge Graph
-        </h4>
-        <p style="margin: 0.5rem 0 0 0; font-size: 0.875rem; color: #6b7280;">
-            {{ nodes|length }} entities • {{ edges|length }} relationships • Click and drag to explore
-        </p>
+    <div style="padding: 1rem; border-bottom: 1px solid #e5e7eb; background: #f9fafb; display:flex; align-items:center; justify-content:space-between; gap:8px;">
+        <div>
+            <h4 style="margin: 0; color: #374151; font-size: 1rem; font-weight: 600;">
+                📊 Session Knowledge Graph
+            </h4>
+            <p style="margin: 0.5rem 0 0 0; font-size: 0.875rem; color: #6b7280;">
+                {{ nodes|length }} entities • {{ edges|length }} relationships • Click and drag to explore
+            </p>
+        </div>
+        <button type="button" class="graph-minimize" style="border:1px solid #cbd5e1; background:#fff; color:#334155; padding:6px 10px; border-radius:8px; font-size:12px; cursor:pointer;" onclick="(function(btn){var root=btn.closest('.graph-visualization');var body=root && root.querySelector('[data-graph-body]');if(!body)return;var hidden=body.style.display==='none';body.style.display= hidden ? '' : 'none'; btn.textContent = hidden ? 'Hide' : 'Show';})(this); event.stopPropagation();">Hide</button>
     </div>
-    
-    <div id="graph-container" style="width: 100%; height: 500px; position: relative; overflow: hidden;">
+
+    <div id="graph-container" data-graph-body style="width: 100%; height: 500px; position: relative; overflow: hidden;">
         <svg id="knowledge-graph" style="width: 100%; height: 100%; background: #fafbfc;"></svg>
         
         <div style="position: absolute; bottom: 10px; left: 10px; background: rgba(255,255,255,0.9); padding: 0.5rem; border-radius: 0.25rem; font-size: 0.75rem; border: 1px solid #e5e7eb;">

@@ -126,8 +126,6 @@ var chatApp = {
         this.displaySessionInfo();
         this.testConnection();
         this.setupEventListeners();
-        // Show graph section by default
-        this.showGraphPanel();
         // Fast UX: render any locally cached chat immediately
         this.loadLocalChat();
     },
@@ -207,8 +205,6 @@ var chatApp = {
                     self.elements.inputStatus.textContent = 'Ready! Ask me about parliamentary discussions.';
                     // After connection, load previous messages for this session
                     self.loadSessionHistory();
-                    // And load graph immediately
-                    self.refreshGraphPanel();
                 } else {
                     throw new Error('Service not healthy: ' + health.status);
                 }
@@ -463,9 +459,6 @@ var chatApp = {
                                         self.addMessage('assistant', eventData.data.response);
                                     }
 
-                                    // Auto-refresh graph panel after each answer
-                                    self.refreshGraphPanel();
-
                                     // Also insert the latest graph inline as a message
                                     self.insertGraphInlineMessage();
                                     
@@ -648,85 +641,16 @@ var chatApp = {
 
     // --- Graph Panel helpers ---
     showGraphPanel: function() {
-        if (this.elements.graphSection) {
-            this.elements.graphSection.classList.remove('hidden');
-        }
-        if (this.elements.refreshGraphButton) {
-            this.elements.refreshGraphButton.classList.remove('hidden');
-        }
+        // Panel deprecated: no-op (graph is rendered inline per response)
     },
 
     hideGraphPanel: function() {
-        if (this.elements.graphSection) {
-            this.elements.graphSection.classList.add('hidden');
-        }
+        // Panel deprecated: ensure hidden if present
+        if (this.elements.graphSection) this.elements.graphSection.classList.add('hidden');
     },
 
     refreshGraphPanel: function() {
-        var self = this;
-        if (!this.elements.graphPanel) return;
-
-        // Ensure the section is visible when refreshing
-        this.showGraphPanel();
-
-        var graphUrl = this.apiBase + '/session/' + this.sessionId + '/graph/visualize';
-        console.log('📡 Refreshing graph panel for session:', this.sessionId, 'URL:', graphUrl);
-        this.elements.graphMeta.textContent = ' • loading…';
-
-        fetch(graphUrl, { method: 'GET', headers: { 'Accept': 'text/html' } })
-            .then(function(response) {
-                console.log('📡 Graph fetch status:', response.status);
-                if (!response.ok) {
-                    // Provide clearer UX when the server has no graph for this session yet
-                    if (response.status === 404) {
-                        throw new Error('No graph yet for this session. Ask a question first, then refresh.');
-                    }
-                    throw new Error('HTTP ' + response.status);
-                }
-                return response.text();
-            })
-            .then(function(htmlContent) {
-                console.log('📡 Graph HTML length:', htmlContent ? htmlContent.length : 0);
-                // Generate unique IDs to avoid collisions
-                var ts = Date.now();
-                var uniqueGraphId = 'knowledge-graph-panel-' + ts;
-                var uniqueContainerId = 'graph-container-panel-' + ts;
-                var updated = htmlContent
-                    .replace(/id="knowledge-graph"/g, 'id="' + uniqueGraphId + '"')
-                    .replace(/id="graph-container"/g, 'id="' + uniqueContainerId + '"')
-                    .replace(/#knowledge-graph/g, '#' + uniqueGraphId)
-                    .replace(/#graph-container/g, '#' + uniqueContainerId);
-
-                self.elements.graphPanel.innerHTML = updated;
-
-                // Execute any inline scripts within the panel content
-                setTimeout(function() {
-                    try {
-                        if (typeof d3 === 'undefined') {
-                            console.error('❌ D3.js not loaded for panel rendering');
-                            return;
-                        }
-                        var scripts = self.elements.graphPanel.querySelectorAll('script');
-                        for (var i = 0; i < scripts.length; i++) {
-                            var code = scripts[i].textContent;
-                            if (code && !code.includes('d3.min.js')) {
-                                try { eval(code); } catch (e) { console.error('Panel script error:', e); }
-                            }
-                        }
-                        // Update meta with basic stats if present in DOM
-                        var label = self.elements.graphPanel.querySelector('.graph-visualization h4');
-                        self.elements.graphMeta.textContent = '';
-                    } catch (e) {
-                        console.error('Graph panel render error:', e);
-                        self.elements.graphMeta.textContent = ' • error rendering';
-                    }
-                }, 50);
-            })
-            .catch(function(err) {
-                console.error('Graph panel fetch failed:', err);
-                self.elements.graphPanel.innerHTML = '<div class="text-sm text-red-600">Failed to load graph: ' + self.escapeHtml(err.message) + '</div>';
-                self.elements.graphMeta.textContent = ' • failed';
-            });
+        // Panel deprecated: no-op
     },
     
     // Enhanced addMessage function with proper script execution
